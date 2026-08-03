@@ -90,7 +90,7 @@ struct ContentView: View {
                 }
 
                 if let sample = monitor.latestSample {
-                    Text("Measured \(sample.timestamp, format: .relative(presentation: .named)) via \(sample.source)")
+                    Text("Measured \(sample.timestamp, format: .relative(presentation: .named)) via \(sample.source.rawValue)")
                         .font(.caption)
                         .foregroundStyle(.secondary)
 

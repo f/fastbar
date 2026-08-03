@@ -7,11 +7,32 @@ import Foundation
 import Combine
 import WebKit
 
+enum SpeedSource: String, Codable, Sendable, CaseIterable {
+    case fastDotCom = "Fast.com"
+    case fastProbeFallback = "FAST probe fallback"
+    case cloudflareFallback = "Cloudflare fallback"
+
+    /// Fallback probes download a fixed, much smaller payload than Fast.com's
+    /// adaptive test, so their results are not comparable and are kept out of
+    /// the rolling average.
+    var isFallback: Bool {
+        self != .fastDotCom
+    }
+
+    /// A stored history may contain a source string this version no longer
+    /// produces. Decode it as `.fastDotCom` instead of failing, because
+    /// `loadHistory()` discards the entire file when decoding throws.
+    init(from decoder: any Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        self = SpeedSource(rawValue: raw) ?? .fastDotCom
+    }
+}
+
 struct SpeedSample: Codable, Identifiable, Sendable {
     let id: UUID
     let timestamp: Date
     let downloadMbps: Double
-    let source: String
+    let source: SpeedSource
     let bytesDownloaded: Int
     let duration: TimeInterval
 
@@ -19,7 +40,7 @@ struct SpeedSample: Codable, Identifiable, Sendable {
         id: UUID = UUID(),
         timestamp: Date = Date(),
         downloadMbps: Double,
-        source: String,
+        source: SpeedSource,
         bytesDownloaded: Int,
         duration: TimeInterval
     ) {
@@ -103,11 +124,7 @@ final class SpeedMonitor: ObservableObject {
 
     var threeHourSamples: [SpeedSample] {
         let cutoff = Date().addingTimeInterval(-3 * 60 * 60)
-        return samples.filter {
-            $0.timestamp >= cutoff
-                && $0.source != "FAST CDN"
-                && $0.source != "fallback probe"
-        }
+        return samples.filter { $0.timestamp >= cutoff && !$0.source.isFallback }
     }
 
     var threeHourAverage: Double? {
@@ -132,6 +149,9 @@ final class SpeedMonitor: ObservableObject {
             trimHistory()
             lastError = nil
             saveHistory()
+        } catch is CancellationError {
+            // Changing the interval or quitting cancels the run in progress.
+            // That is not a measurement failure, so leave `lastError` alone.
         } catch {
             lastError = "Speed test failed: \(error.localizedDescription)"
         }
@@ -228,8 +248,18 @@ private enum FastSpeedTest {
     static func measure(bytesPerStream: Int) async throws -> SpeedSample {
         do {
             return try await measureWithFastDotCom()
+        } catch is CancellationError {
+            // A cancelled run must not silently fall through to the probes.
+            throw CancellationError()
         } catch {
-            return try await measureWithDirectProbe(bytesPerStream: bytesPerStream)
+            do {
+                return try await measureWithDirectProbe(bytesPerStream: bytesPerStream)
+            } catch let fallbackError {
+                throw SpeedTestError.allProbesFailed(
+                    primary: error,
+                    fallback: fallbackError
+                )
+            }
         }
     }
 
@@ -248,6 +278,10 @@ private enum FastSpeedTest {
         guard webView.load(request) != nil else {
             throw SpeedTestError.couldNotStart
         }
+
+        // Covers the cancellation and timeout paths too, so an abandoned run
+        // never keeps downloading in the background.
+        defer { webView.stopLoading() }
 
         let clock = ContinuousClock()
         let start = clock.now
@@ -285,11 +319,10 @@ private enum FastSpeedTest {
 
                 let elapsed = start.duration(to: clock.now).seconds
                 let downloadedMB = (result["downloadedMB"] as? NSNumber)?.doubleValue ?? 0
-                webView.stopLoading()
 
                 return SpeedSample(
                     downloadMbps: convertToMbps(speed, unit: unit),
-                    source: "Fast.com",
+                    source: .fastDotCom,
                     bytesDownloaded: Int(downloadedMB * 1_000_000),
                     duration: elapsed
                 )
@@ -299,7 +332,6 @@ private enum FastSpeedTest {
             }
         }
 
-        webView.stopLoading()
         throw SpeedTestError.timedOut
     }
 
@@ -326,7 +358,7 @@ private enum FastSpeedTest {
 
             return SpeedSample(
                 downloadMbps: result.megabitsPerSecond,
-                source: "FAST probe fallback",
+                source: .fastProbeFallback,
                 bytesDownloaded: result.bytes,
                 duration: result.duration
             )
@@ -338,7 +370,7 @@ private enum FastSpeedTest {
 
             return SpeedSample(
                 downloadMbps: result.megabitsPerSecond,
-                source: "Cloudflare fallback",
+                source: .cloudflareFallback,
                 bytesDownloaded: result.bytes,
                 duration: result.duration
             )
@@ -458,9 +490,13 @@ private enum SpeedTestError: LocalizedError {
     case emptyDownload
     case couldNotStart
     case timedOut
+    case allProbesFailed(primary: any Error, fallback: any Error)
 
     var errorDescription: String? {
         switch self {
+        case let .allProbesFailed(primary, fallback):
+            return "Fast.com failed (\(primary.localizedDescription)) "
+                + "and the fallback probe failed (\(fallback.localizedDescription))."
         case .noTargets:
             return "FAST returned no test servers."
         case .badResponse:
