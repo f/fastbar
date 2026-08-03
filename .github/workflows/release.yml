@@ -104,12 +104,12 @@ jobs:
             version "${VERSION_NUMBER}"
             sha256 "${SHA256}"
 
-            url "https://github.com/f/fastbar/releases/download/${VERSION}/FastBar.dmg"
+            url "https://github.com/f/fastbar/releases/download/v#{version}/FastBar.dmg"
             name "FastBar"
             desc "Fast.com download speed and history in the macOS menu bar"
             homepage "https://github.com/f/fastbar"
 
-            depends_on macos: ">= :sonoma"
+            depends_on macos: :sonoma
 
             app "FastBar.app"
 
