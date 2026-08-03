@@ -118,10 +118,10 @@ jobs:
             end
 
             zap trash: [
-              "~/Library/Containers/org.presship.FastBar",
-              "~/Library/Preferences/org.presship.FastBar.plist",
-              "~/Library/Saved Application State/org.presship.FastBar.savedState",
-              "~/Library/WebKit/org.presship.FastBar",
+              "~/Library/Containers/dev.fka.fastbar",
+              "~/Library/Preferences/dev.fka.fastbar.plist",
+              "~/Library/Saved Application State/dev.fka.fastbar.savedState",
+              "~/Library/WebKit/dev.fka.fastbar",
             ]
           end
           EOF
