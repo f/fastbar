@@ -1,0 +1,141 @@
+name: Build & Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-26
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Get version from tag
+        id: version
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          VERSION="${TAG#v}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "number=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Update app version
+        run: |
+          sed -i '' \
+            "s/MARKETING_VERSION = .*;/MARKETING_VERSION = ${{ steps.version.outputs.number }};/g" \
+            FastBar/FastBar.xcodeproj/project.pbxproj
+
+      - name: Commit version bump
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add FastBar/FastBar.xcodeproj/project.pbxproj
+          git commit -m "Bump version to ${{ steps.version.outputs.number }}" || echo "No version change to commit"
+          git push origin HEAD:refs/heads/main || echo "Version push skipped"
+
+      - name: Select Xcode 26
+        run: |
+          XCODE_APP="$(find /Applications -maxdepth 1 -type d -name 'Xcode_26*.app' | sort -V | tail -1)"
+          if [[ -z "${XCODE_APP:-}" ]]; then
+            echo "Xcode 26 not found on this runner."
+            exit 1
+          fi
+
+          sudo xcode-select -s "${XCODE_APP}/Contents/Developer"
+          xcodebuild -version
+
+      - name: Build universal DMG
+        run: |
+          chmod +x build.sh
+          ./build.sh
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: build/release/FastBar.dmg
+          name: FastBar ${{ steps.version.outputs.tag }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          body: |
+            ## Installation
+
+            Install with Homebrew:
+
+            ```bash
+            brew install f/tap/fastbar
+            ```
+
+            Or download **FastBar.dmg**, open it, and drag FastBar into Applications.
+
+            The app is ad-hoc signed but not notarized. If macOS blocks the first launch:
+
+            ```bash
+            xattr -cr /Applications/FastBar.app
+            ```
+
+      - name: Compute DMG SHA256
+        id: sha
+        run: echo "sha256=$(shasum -a 256 build/release/FastBar.dmg | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+
+      - name: Update Homebrew cask
+        env:
+          TAP_REPO_TOKEN_HOMEBREW: ${{ secrets.TAP_REPO_TOKEN_HOMEBREW }}
+          VERSION: ${{ steps.version.outputs.tag }}
+          SHA256: ${{ steps.sha.outputs.sha256 }}
+        run: |
+          if [[ -z "${TAP_REPO_TOKEN_HOMEBREW:-}" ]]; then
+            echo "TAP_REPO_TOKEN_HOMEBREW is not configured."
+            exit 1
+          fi
+
+          VERSION_NUMBER="${VERSION#v}"
+          git clone https://github.com/f/homebrew-tap.git tap
+
+          cat > tap/Casks/fastbar.rb << EOF
+          cask "fastbar" do
+            version "${VERSION_NUMBER}"
+            sha256 "${SHA256}"
+
+            url "https://github.com/f/fastbar/releases/download/${VERSION}/FastBar.dmg"
+            name "FastBar"
+            desc "Fast.com download speed and history in the macOS menu bar"
+            homepage "https://github.com/f/fastbar"
+
+            depends_on macos: ">= :sonoma"
+
+            app "FastBar.app"
+
+            postflight do
+              system_command "/usr/bin/xattr", args: ["-cr", "#{appdir}/FastBar.app"]
+            end
+
+            zap trash: [
+              "~/Library/Containers/org.presship.FastBar",
+              "~/Library/Preferences/org.presship.FastBar.plist",
+              "~/Library/Saved Application State/org.presship.FastBar.savedState",
+              "~/Library/WebKit/org.presship.FastBar",
+            ]
+          end
+          EOF
+
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Casks/fastbar.rb
+
+          if git diff --cached --quiet; then
+            echo "Homebrew cask is already up to date."
+            exit 0
+          fi
+
+          git commit -m "Update fastbar to ${VERSION}"
+          git remote set-url origin "https://x-access-token:${TAP_REPO_TOKEN_HOMEBREW}@github.com/f/homebrew-tap.git"
+          git push origin main
