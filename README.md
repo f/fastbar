@@ -1,6 +1,10 @@
 <h1 align="center">FastBar</h1>
 
 <p align="center">
+  <img src="assets/FastBar-Icon-1024.png" width="128" height="128" alt="FastBar app icon">
+</p>
+
+<p align="center">
   Your current Fast.com download speed, always visible in the macOS menu bar.
 </p>
 
