@@ -94,6 +94,12 @@ struct ContentView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
 
+                    if let server = sample.serverText {
+                        Label("Server: \(server)", systemImage: "server.rack")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+
                     if let average = monitor.threeHourAverage {
                         Text("3-hour average: \(average.formatted(.number.precision(.fractionLength(1)))) Mbps")
                             .font(.caption.weight(.semibold))
@@ -213,6 +219,13 @@ struct ContentView: View {
 
                     Text(sample.timestamp, format: .dateTime.hour().minute())
                         .foregroundStyle(.secondary)
+
+                    if let server = sample.serverText {
+                        Text(server)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
 
                     Spacer()
 

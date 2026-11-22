@@ -14,6 +14,7 @@ struct SpeedSample: Codable, Identifiable, Sendable {
     let source: String
     let bytesDownloaded: Int
     let duration: TimeInterval
+    let servers: [String]?
 
     init(
         id: UUID = UUID(),
@@ -21,7 +22,8 @@ struct SpeedSample: Codable, Identifiable, Sendable {
         downloadMbps: Double,
         source: String,
         bytesDownloaded: Int,
-        duration: TimeInterval
+        duration: TimeInterval,
+        servers: [String]? = nil
     ) {
         self.id = id
         self.timestamp = timestamp
@@ -29,6 +31,16 @@ struct SpeedSample: Codable, Identifiable, Sendable {
         self.source = source
         self.bytesDownloaded = bytesDownloaded
         self.duration = duration
+        self.servers = servers
+    }
+
+    var serverText: String? {
+        servers.map { $0.joined(separator: " · ") }
+    }
+
+    /// Country code of the first server ("Izmir, TR" -> "TR"), or the raw value ("AMS").
+    var serverCode: String? {
+        servers?.first?.components(separatedBy: ", ").last
     }
 }
 
@@ -75,15 +87,19 @@ final class SpeedMonitor: ObservableObject {
             return "Testing…"
         }
 
-        guard let latest = latestSample?.downloadMbps else {
+        guard let sample = latestSample else {
             return "— Mbps"
         }
 
+        let latest = sample.downloadMbps
         let latestText = latest.formatted(
             .number.precision(.fractionLength(latest >= 100 ? 0 : 1))
         )
 
-        return "\(latestText) Mbps"
+        guard let code = sample.serverCode else {
+            return "\(latestText) Mbps"
+        }
+        return "\(latestText) Mbps · \(code)"
     }
 
     var menuBarAverageText: String {
@@ -269,6 +285,8 @@ private enum FastSpeedTest {
                             speed: Number(speedElement?.textContent) || 0,
                             unit: unitElement?.textContent?.trim() || 'Mbps',
                             downloadedMB: Number(downloadedElement?.textContent?.trim()) || 0,
+                            servers: (document.querySelector('#server-locations')?.textContent || '')
+                                .split('|').map(s => s.trim()).filter(Boolean),
                             succeeded: Boolean(speedElement?.classList.contains('succeeded'))
                         };
                     })()
@@ -285,13 +303,15 @@ private enum FastSpeedTest {
 
                 let elapsed = start.duration(to: clock.now).seconds
                 let downloadedMB = (result["downloadedMB"] as? NSNumber)?.doubleValue ?? 0
+                let servers = result["servers"] as? [String] ?? []
                 webView.stopLoading()
 
                 return SpeedSample(
                     downloadMbps: convertToMbps(speed, unit: unit),
                     source: "Fast.com",
                     bytesDownloaded: Int(downloadedMB * 1_000_000),
-                    duration: elapsed
+                    duration: elapsed,
+                    servers: servers.isEmpty ? nil : servers
                 )
             } catch {
                 // The page is not script-ready while it is navigating. Keep polling
@@ -318,17 +338,19 @@ private enum FastSpeedTest {
 
     private static func measureWithDirectProbe(bytesPerStream: Int) async throws -> SpeedSample {
         do {
-            let targets = try await fetchFastTargets()
+            let targets = Array(try await fetchFastTargets().prefix(2))
             let result = try await downloadInParallel(
-                from: Array(targets.prefix(2)),
+                from: targets.map(\.url),
                 bytesPerStream: bytesPerStream
             )
+            let servers = targets.compactMap(\.location).map { "\($0.city), \($0.country)" }
 
             return SpeedSample(
                 downloadMbps: result.megabitsPerSecond,
                 source: "FAST probe fallback",
                 bytesDownloaded: result.bytes,
-                duration: result.duration
+                duration: result.duration,
+                servers: servers.isEmpty ? nil : servers
             )
         } catch {
             let fallback = URL(
@@ -340,12 +362,13 @@ private enum FastSpeedTest {
                 downloadMbps: result.megabitsPerSecond,
                 source: "Cloudflare fallback",
                 bytesDownloaded: result.bytes,
-                duration: result.duration
+                duration: result.duration,
+                servers: result.server.map { [$0] }
             )
         }
     }
 
-    private static func fetchFastTargets() async throws -> [URL] {
+    private static func fetchFastTargets() async throws -> [(url: URL, location: FastLocation?)] {
         var request = URLRequest(url: configurationURL)
         request.timeoutInterval = 15
         request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
@@ -354,7 +377,9 @@ private enum FastSpeedTest {
         try validate(response)
 
         let configuration = try JSONDecoder().decode(FastConfiguration.self, from: data)
-        let targets = configuration.targets.compactMap { URL(string: $0.url) }
+        let targets = configuration.targets.compactMap { target in
+            URL(string: target.url).map { (url: $0, location: target.location) }
+        }
 
         guard !targets.isEmpty else {
             throw SpeedTestError.noTargets
@@ -424,7 +449,9 @@ private enum FastSpeedTest {
             throw SpeedTestError.emptyDownload
         }
 
-        return DownloadResult(bytes: data.count, duration: elapsed)
+        // Cloudflare reports the serving data center (IATA code, e.g. "AMS") in `colo`.
+        let colo = (response as? HTTPURLResponse)?.value(forHTTPHeaderField: "colo")
+        return DownloadResult(bytes: data.count, duration: elapsed, server: colo)
     }
 
     private static func validate(_ response: URLResponse) throws {
@@ -441,11 +468,18 @@ private struct FastConfiguration: Decodable {
 
 private struct FastTarget: Decodable {
     let url: String
+    let location: FastLocation?
+}
+
+private struct FastLocation: Decodable {
+    let city: String
+    let country: String
 }
 
 private struct DownloadResult {
     let bytes: Int
     let duration: TimeInterval
+    var server: String? = nil
 
     var megabitsPerSecond: Double {
         (Double(bytes) * 8) / duration / 1_000_000
